@@ -2,7 +2,6 @@ pandas
 pandas-ta
 tradingview-screener
 Flask
-rookiepy
 websockets
 protobuf
 Flask-SocketIO

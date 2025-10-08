@@ -1,0 +1,2 @@
+my.properties
+\n# Python cache\n__pycache__/\n\n# Log files\n*.log

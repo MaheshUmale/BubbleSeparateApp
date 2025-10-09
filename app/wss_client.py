@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import upstox_client
 from google.protobuf.json_format import MessageToDict
-
+import threading
 from flask_socketio import SocketIO, join_room, leave_room
 import configparser
 
@@ -16,6 +16,12 @@ from datetime import datetime
 
 UpstoxWSS_JSONFilename = 'UpstoxWSS_' + datetime.now().strftime('%d_%m_%y') + '.txt'
 FILEPATH = 'static/'+UpstoxWSS_JSONFilename
+
+# Connection states
+DISCONNECTED = "DISCONNECTED"
+CONNECTING = "CONNECTING"
+CONNECTED = "CONNECTED"
+
 class WSSClient:
     """
     Handles the WebSocket connection to Upstox for live market data.
@@ -26,7 +32,9 @@ class WSSClient:
         self.bubble_chart = bubble_chart
         self.upstox_streamer = None
         self.subscribed_instrument_keys = set()
-        self.connected = False
+        self.connection_state = DISCONNECTED
+        self.connection_lock = threading.Lock()
+        self.access_token = None
 
         # Define file paths relative to the project root
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +43,7 @@ class WSSClient:
         # Initialize and cache the instrument-to-symbol mapping
         self.instrument_map = self._initialize_instrument_map()
         self.symbol_to_key_map = {value: key for key, value in self.instrument_map.items()}
+
     def _initialize_instrument_map(self):
         """
         Creates and returns a mapping from instrument_key to tradingsymbol.
@@ -57,24 +66,27 @@ class WSSClient:
     def start_websocket_connection(self, access_token):
         """
         Initializes and starts the connection to the Upstox WebSocket API.
+        This is the single entry point for managing the connection lifecycle.
         """
-         
-        print("***starting WSS with UPSTOX"*80)
-        if not access_token:
+        with self.connection_lock:
+            if self.connection_state in [CONNECTED, CONNECTING]:
+                print(f"WebSocket connection attempt ignored. State: {self.connection_state}")
+                return
+
+            self.connection_state = CONNECTING
+            self.access_token = access_token
+
+        if not self.access_token:
             self.socketio.emit('backend_status', {'message': 'Upstox Access Token not available.'})
-            return
-        if self.upstox_streamer and self.is_connected():
-            print("Streamer is already connected.")
+            self.connection_state = DISCONNECTED
             return
 
         print("Configuring Upstox API client...")
         config = upstox_client.Configuration()
-        config.access_token = access_token
+        config.access_token = self.access_token
         api_client = upstox_client.ApiClient(config)
 
         self.upstox_streamer = upstox_client.MarketDataStreamerV3(api_client)
-
-        # Register websocket event handlers
         self.upstox_streamer.on("open", self.on_open)
         self.upstox_streamer.on("message", self.on_message)
         self.upstox_streamer.on("close", self.on_close)
@@ -86,19 +98,30 @@ class WSSClient:
         except Exception as e:
             print(f"Error connecting to Upstox WebSocket: {e}")
             self.socketio.emit('backend_status', {'message': f'Error connecting to Upstox: {e}.'})
+            self.connection_state = DISCONNECTED
+
+    def disconnect(self):
+        """
+        Disconnects the WebSocket client and resets the state.
+        """
+        with self.connection_lock:
+            if self.upstox_streamer and self.connection_state != DISCONNECTED:
+                print("Disconnecting from Upstox WebSocket...")
+                self.upstox_streamer.disconnect()
+            self.connection_state = DISCONNECTED
+            self.upstox_streamer = None
 
     def on_open(self):
         """Handler for when the WebSocket connection is opened."""
+        with self.connection_lock:
+            self.connection_state = CONNECTED
         self.socketio.emit('backend_status', {'message': 'Connected to Upstox market data.'})
-        # If there are already subscribed instruments, resubscribe on reconnect
         if self.subscribed_instrument_keys:
             print(f"Resubscribing to {len(self.subscribed_instrument_keys)} instruments on connection open.")
             self.upstox_streamer.subscribe(list(self.subscribed_instrument_keys), "ltpc")
-            self.connected = True
 
     def on_message(self, message):
         """Handler for incoming messages (ticks) from the WebSocket."""
-        #### MAHESH CHANGES FOR THE TICKER ID INSTEAD OF INSTRUMENT CODE 
         messageWithTickerNAme = self._append_tick_to_file(message)
         if(messageWithTickerNAme):
             self.bubble_chart.broadcast_live_tick(messageWithTickerNAme)
@@ -107,13 +130,25 @@ class WSSClient:
         """Handler for when the WebSocket connection is closed."""
         self.socketio.emit('backend_status', {'message': 'Disconnected from Upstox market data.'})
         print(f"Upstox WebSocket connection closed: {code} - {reason}")
-        self.connected = False
+        self.disconnect()
+        self.reconnect()
 
     def on_error(self, error):
         """Handler for any WebSocket errors."""
         print(f"Upstox WebSocket error: {error}")
         self.socketio.emit('backend_status', {'message': f'WebSocket Error: {error}'})
-        self.connected = False
+        self.disconnect()
+        self.reconnect()
+
+    def reconnect(self):
+        """
+        Initiates a reconnection attempt after a delay.
+        """
+        with self.connection_lock:
+            if self.connection_state == DISCONNECTED:
+                print("Attempting to reconnect...")
+                time.sleep(5)  # Wait for 5 seconds before reconnecting
+                self.start_websocket_connection(self.access_token)
 
     def subscribe(self, instrument_keys: list):
         """Subscribes to a list of new instrument keys."""
@@ -162,20 +197,7 @@ class WSSClient:
         except Exception as e:
             print(f"Error writing tick to file: {e}")
 
-
-    # def connect(self):
-    #         print(f"Attempting to connect to WebSocket URL: {self.websocket_url}")
-    #         self.ws = websocket.WebSocketApp(
-    #             self.websocket_url,
-    #             on_open=self.on_open,
-    #             on_message=self.on_message,
-    #             on_error=self.on_error,
-    #             on_close=self.on_close
-    #         )
-    #         # Use rel for automatic reconnection and handle connection state via callbacks
-    #         self.ws.run_forever(dispatcher=rel, reconnect=5) # Attempts reconnect every 5 seconds
-
     def is_connected(self):
         """Returns the custom connection status flag."""
-        return self.connected
+        return self.connection_state == CONNECTED
     

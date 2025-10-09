@@ -107,6 +107,16 @@ def callback():
         client_id, client_secret, redirect_uri = load_properties_file()
         token = get_access_token(code, client_id, client_secret, redirect_uri)
 
+
+        config_path = os.path.join(os.path.dirname(__file__), '..', 'my.properties')
+
+        config = configparser.ConfigParser()
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file '{config_path}' not found.")
+
+        config['DEFAULT']['token']=token
+
+
         if token:
             session['upstox_access_token'] = token
             flash('Successfully logged in to Upstox!', 'success')
@@ -129,6 +139,41 @@ def callback():
     except Exception as e:
         flash(f"An unexpected error occurred: {e}", "error")
         return redirect(url_for('upstox_auth.login_page'))
+
+@upstox_auth_bp.route('/WSS')
+def reStartWSSClient():
+        
+        """
+        Loads properties from the my.properties file located in the project root.
+        """
+        # The config file is in the parent directory of this blueprint's root path.
+        config_path = os.path.join(os.path.dirname(__file__), '..', 'my.properties')
+
+        config = configparser.ConfigParser()
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file '{config_path}' not found.")
+
+        config.read(config_path)
+
+        # The callback URL should be defined here, pointing to this blueprint's endpoint.
+        redirect_uri = "http://127.0.0.1:8080/upstox/callback"
+
+        token = config['DEFAULT']['token']
+        if token:
+                
+            if _start_websocket_connection:
+                # Start the websocket connection in a background thread
+                websocket_thread = Thread(target=_start_websocket_connection, args=(token,), daemon=True)
+                websocket_thread.start()
+            else:
+                flash("Websocket connection could not be started.", "error")
+
+            return redirect(url_for('index'))
+
+        else:
+            flash('Failed to get access token from Upstox. Please try again.', 'error')
+            
+            return redirect(url_for('upstox_auth.login_page'))
 
 # This function is no longer needed as the app factory will handle initialization
 def initialize_auth(app):

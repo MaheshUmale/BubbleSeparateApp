@@ -4,22 +4,28 @@ import time
 from flask import Blueprint, request
 from threading import Thread
 from google.protobuf.json_format import MessageToDict
+from flask_socketio import SocketIO, join_room,leave_room
+
+from datetime import datetime
+
+UpstoxWSS_JSONFilename = 'UpstoxWSS_' + datetime.now().strftime('%d_%m_%y') + '.txt'
+FILEPATH = 'static/'+UpstoxWSS_JSONFilename
 
 class BubbleChartLogic:
     """
     Manages the business logic for the bubble chart, including handling client
     connections, loading historical data, and broadcasting live ticks.
     """
-    def __init__(self, socketio):
+    def __init__(self,  socketio):
         self.socketio = socketio
         self.bp = Blueprint('bubble_chart', __name__, template_folder='../templates')
         self.clients = {}
         self.file_data_cache = {}
-        self.available_securities = []
+        self.available_securities = [] 
 
         # Define the history file path relative to the project root
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.history_file = os.path.join(project_root, "Upstox_date.txt")
+        self.history_file = os.path.join(project_root, FILEPATH)
 
         # Start loading the historical data in a background thread.
         self.data_loading_thread = Thread(target=self._load_file_data)
@@ -46,7 +52,7 @@ class BubbleChartLogic:
                 return
             print(f"Client {sid} requested data for symbol: {symbol}")
             self.clients[sid]['symbol'] = symbol
-            self.socketio.join_room(symbol, sid=sid, namespace=namespace)
+            join_room(symbol, sid=sid, namespace=namespace)
             # Send historical data for the requested symbol.
             self.socketio.start_background_task(self._send_historical_ticks, symbol, sid)
 
@@ -57,7 +63,7 @@ class BubbleChartLogic:
                 print(f"Client disconnected: {sid}")
                 symbol = self.clients[sid].get('symbol')
                 if symbol:
-                    self.socketio.leave_room(symbol, sid=sid, namespace=namespace)
+                    leave_room(symbol, sid=sid, namespace=namespace)
                 del self.clients[sid]
 
     def _load_file_data(self):

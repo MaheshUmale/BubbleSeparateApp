@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Live Market Data Visualizer</title>
+    <title>Dual-Interval Market Data Visualizer</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
         .spinner { border: 4px solid rgba(0, 0, 0, 0.1); border-left-color: #3b82f6; border-radius: 50%; width: 1rem; height: 1rem; animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -15,27 +16,45 @@
 </head>
 <body class="text-gray-800">
     <div id="app" class="container mx-auto p-4 max-w-7xl">
-        <h1 class="text-3xl font-bold mb-2 text-gray-900">Live Market Visualizer</h1>
+        <h1 class="text-3xl font-bold mb-2 text-gray-900">Live Market Visualizer (Dual Aggregation)</h1>
         <h2 id="symbol-header" class="text-xl font-semibold text-blue-600 mb-6">No Symbol Selected</h2>
 
         <div class="bg-white p-4 rounded-lg shadow-lg mb-6">
-            <div class="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+            <div class="grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
                 <div>
                     <label for="security-select" class="block text-sm font-medium text-gray-700">Select Security</label>
                     <select id="security-select" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 rounded-md">
-                        <option value="" disabled selected>-- Loading --</option>
+                        <option value="" disabled selected>-- Connecting --</option>
                     </select>
                 </div>
                 <div>
-                    <label for="interval-input" class="block text-sm font-medium text-gray-700">Candle Interval</label>
-                    <select id="interval-input" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 rounded-md">
-                        <option value="10000">10 Seconds</option>
+                    <label for="candle-interval-input" class="block text-sm font-medium text-gray-700">Candle Interval (OHLCV)</label>
+                    <select id="candle-interval-input" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 rounded-md">
+                        <option value="15000">15 Seconds</option>
+                        <option value="30000">30 Seconds</option>
                         <option value="60000" selected>1 Minute</option>
+                        <option value="120000">2 Minutes</option>
+                        <option value="180000">3 Minutes</option>
                         <option value="300000">5 Minutes</option>
+                        <option value="600000">10 Minutes</option>
+                        <option value="900000">15 Minutes</option>
+                        <option value="18000000">30 Minutes</option>
                     </select>
                 </div>
                 <div>
-                    <label for="bubble-threshold" class="block text-sm font-medium text-gray-700">Bubble Threshold</label>
+                    <label for="bubble-interval-input" class="block text-sm font-medium text-gray-700">Bubble Aggregation (Big Player)</label>
+                    <select id="bubble-interval-input" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 rounded-md">
+                        <option value="1">No aggregation (ms)</option>
+                        <option value="1000" selected>1 Second</option>
+                        <option value="2000">2 Seconds</option>
+                        <option value="5000">5 Seconds</option>
+                        <option value="10000">10 Seconds</option>
+                        <option value="15000">15 Seconds</option>
+                        <option value="30000">30 Seconds</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="bubble-threshold" class="block text-sm font-medium text-gray-700">Bubble Threshold (Total Qty)</label>
                     <input type="number" id="bubble-threshold" value="20" class="mt-1 block w-full pl-3 pr-3 py-2 text-base border-gray-300 rounded-md">
                 </div>
                 <div>
@@ -57,43 +76,46 @@
     </div>
 
     <script>
-        // --- DOM Elements ---
+        // --- 1. DOM Elements & Global State ---
         const securitySelect = document.getElementById('security-select');
-        const intervalInput = document.getElementById('interval-input');
+        const candleIntervalInput = document.getElementById('candle-interval-input'); 
+        const bubbleIntervalInput = document.getElementById('bubble-interval-input'); 
         const bubbleThresholdInput = document.getElementById('bubble-threshold');
         const bigPlayerQtyInput = document.getElementById('big-player-qty');
         const statusText = document.getElementById('status-text');
         const spinner = document.querySelector('.spinner');
         const chartContainer = document.getElementById('trading-chart');
 
-        // --- Global State ---
         let tradingChart = null;
         let socket = null;
         let currentSymbol = null;
+        let globalAvgLtq = 1;
 
-        // chartState holds all the data required for rendering and updates.
-        // It's reset whenever a new symbol is selected or a full redraw is needed.
         const chartState = {
             rawTicks: [],
-            tradesByTime: new Map(), // For efficient bubble calculation
+            tradesByBubbleTime: new Map(), 
             lastTradePrice: 0,
-            ohlcData: [],
+            ohlcData: [], 
             normalBuyVol: [],
             bigBuyVol: [],
             normalSellVol: [],
             bigSellVol: [],
-            bubbleData: []
+            bubbleData: [] 
         };
 
-        // --- Core Functions ---
+        // --- 2. Core Utilities ---
+        
         const updateStatus = (text, isLoading = false) => {
             statusText.textContent = text;
             spinner.style.display = isLoading ? 'block' : 'none';
         };
 
-        const resetChartState = () => {
-            chartState.rawTicks = [];
-            chartState.tradesByTime.clear();
+        /**
+         * Clears all aggregated data, but NOT the rawTicks.
+         * This is used when re-aggregating with new interval settings.
+         */
+        const resetAggregatedData = () => {
+            chartState.tradesByBubbleTime.clear();
             chartState.lastTradePrice = 0;
             chartState.ohlcData = [];
             chartState.normalBuyVol = [];
@@ -102,31 +124,59 @@
             chartState.bigSellVol = [];
             chartState.bubbleData = [];
         };
+        
+        const calculateGlobalAverage = (ticks) => {
+            if (ticks.length === 0) {
+                globalAvgLtq = 1;
+                return;
+            }
+            const validTicks = ticks.filter(tick => !isNaN(Number(tick.ltq)) && Number(tick.ltq) > 0);
+            const totalQuantity = validTicks.reduce((sum, tick) => sum + Number(tick.ltq), 0);
+            globalAvgLtq = validTicks.length > 0 ? totalQuantity / validTicks.length : 1;
+        };
 
-        // --- Data Processing Functions ---
-
-        /**
-         * Recalculates only the bubble data based on the current threshold.
-         * This function is optimized to use the pre-aggregated `tradesByTime` map.
+        /** * CRITICAL FIX: Normalizes the tick timestamp (ltt) to a valid JavaScript millisecond timestamp.
+         * Scales down timestamps that are unreasonably far in the future (> Jan 1, 2030).
          */
+        const normalizeTimestamp = (timestampString) => {
+            let timeMs = Number(timestampString);
+            if (isNaN(timeMs)) return NaN;
+            
+            if (timestampString.length >= 13) {
+                // 1893456000000 is 2030-01-01T00:00:00.000Z
+                if (timeMs > 1893456000000) {
+                    // console.warn(`Timestamp ${timestampString} appears to be in the future. Scaling by 1000.`);
+                    return Math.floor(timeMs / 1000) * 1000;
+                }
+            }
+            return timeMs;
+        };
+
+        // --- 3. Data Processing (Dual-Interval Logic) ---
+
+        /** Recalculates only the bubble series data. */
         function updateBubbleSeries() {
-            console.log("Updating bubble series with new threshold...");
-            const bubbleThreshold = parseInt(bubbleThresholdInput.value, 10);
+            const bubbleThreshold = Number(bubbleThresholdInput.value);
+            const bigPlayerThreshold = Number(bigPlayerQtyInput.value);
             const newBubbleData = [];
 
-            chartState.tradesByTime.forEach((group, timeMs) => {
-                if (group.sumLtq >= bubbleThreshold) {
-                    newBubbleData.push([timeMs, group.price, group.sumLtq]);
+            chartState.tradesByBubbleTime.forEach((group, bubbleIntervalStartMs) => {
+                // Ensure maxLtq is calculated from the numerical value of ltq
+                const maxLtq = group.trades.reduce((max, t) => Math.max(max, Number(t.ltq)), 0);
+                
+                if (group.sumLtq >= bubbleThreshold && maxLtq >= bigPlayerThreshold) {
+                    const impactScore = maxLtq / globalAvgLtq; 
+                    newBubbleData.push([bubbleIntervalStartMs, group.price, group.sumLtq, impactScore]);
                 }
             });
 
             chartState.bubbleData = newBubbleData;
+            // Only update the bubble series
             tradingChart.setOption({ series: [{ id: 'bubbles', data: chartState.bubbleData }] });
         }
 
         /**
-         * Processes the entire dataset to build all chart series from scratch.
-         * This is called on initial load or when a setting (like interval) changes.
+         * Processes the entire historical dataset to build all chart series from scratch.
          */
         function processAndDrawAll() {
             if (chartState.rawTicks.length === 0) {
@@ -135,60 +185,83 @@
             }
             console.log(`Full reprocessing of ${chartState.rawTicks.length} ticks.`);
 
-            const intervalMs = parseInt(intervalInput.value, 10);
-            const bigPlayerThreshold = parseInt(bigPlayerQtyInput.value, 10);
-            const bubbleThreshold = parseInt(bubbleThresholdInput.value, 10);
-
-            // Reset all data arrays
-            resetChartState();
-            const localRawTicks = [...chartState.rawTicks]; // Work on a copy
-            chartState.rawTicks = localRawTicks; // Put it back after reset
-
-            const buckets = new Map();
+            const candleIntervalMs = Number(candleIntervalInput.value);
+            const bubbleIntervalMs = Number(bubbleIntervalInput.value);
+            
+            const bigPlayerThreshold = Number(bigPlayerQtyInput.value);
+            const bubbleThreshold = Number(bubbleThresholdInput.value);
+            
+            calculateGlobalAverage(chartState.rawTicks);
+            resetAggregatedData(); // *** FIX: Only clear aggregated data ***
+            
+            const ohlcBuckets = new Map(); 
+            let validTickCount = 0;
 
             chartState.rawTicks.forEach(tick => {
-                const timeMs = parseInt(tick.ltt, 10);
-                if (isNaN(timeMs)) return;
+                // --- Robust Parsing & Validation with Timestamp Normalization ---
+                const timeMs = normalizeTimestamp(tick.ltt);
+                const price = Number(tick.ltp);
+                const quantity = Number(tick.ltq);
+                
+                // CRITICAL CHECK: Skip invalid data points
+                if (isNaN(timeMs) || isNaN(price) || isNaN(quantity) || quantity <= 0) {
+                    return; 
+                }
+                
+                validTickCount++;
 
-                // --- OHLCV Aggregation ---
-                const intervalStartMs = Math.floor(timeMs / intervalMs) * intervalMs;
-                if (!buckets.has(intervalStartMs)) {
-                    buckets.set(intervalStartMs, {
-                        time: intervalStartMs, open: tick.ltp, high: tick.ltp, low: tick.ltp, close: tick.ltp,
-                        buyVolume: 0, bigPlayerBuyVolume: 0, sellVolume: 0, bigPlayerSellVolume: 0
+                // CALCULATE TWO SEPARATE INTERVAL START TIMES (Ensuring integer time key)
+                const candleIntervalStartMs = Math.floor(timeMs / candleIntervalMs) * candleIntervalMs;
+                const bubbleIntervalStartMs = Math.floor(timeMs / bubbleIntervalMs) * bubbleIntervalMs;
+                
+                // --- A. TradesByBubbleTime Aggregation (for bubbles) ---
+                if (!chartState.tradesByBubbleTime.has(bubbleIntervalStartMs)) {
+                    chartState.tradesByBubbleTime.set(bubbleIntervalStartMs, { sumLtq: 0, price: price, trades: [] }); 
+                }
+                const tradeGroup = chartState.tradesByBubbleTime.get(bubbleIntervalStartMs);
+                tradeGroup.sumLtq += quantity;
+                tradeGroup.trades.push(tick); 
+                tradeGroup.price = price; 
+
+                // --- B. OHLCV Aggregation (for candles and volume bars) ---
+                if (!ohlcBuckets.has(candleIntervalStartMs)) {
+                    ohlcBuckets.set(candleIntervalStartMs, {
+                        time: candleIntervalStartMs, open: price, high: price, low: price, close: price,
+                        buyVolume: 0, bigPlayerBuyVolume: 0, sellVolume: 0, bigPlayerSellVolume: 0,
+                        firstTradeTime: timeMs
                     });
                 }
-                const bucket = buckets.get(intervalStartMs);
-                bucket.high = Math.max(bucket.high, tick.ltp);
-                bucket.low = Math.min(bucket.low, tick.ltp);
-                bucket.close = tick.ltp;
+                const bucket = ohlcBuckets.get(candleIntervalStartMs);
+                bucket.high = Math.max(bucket.high, price);
+                bucket.low = Math.min(bucket.low, price);
+                bucket.close = price; 
 
-                const aggressor = chartState.lastTradePrice === 0 ? 'HOLD' : tick.ltp > chartState.lastTradePrice ? 'BUY' : 'SELL';
-                chartState.lastTradePrice = tick.ltp;
+                // Volume Aggregation Logic
+                const aggressor = chartState.lastTradePrice === 0 ? 'HOLD' : price > chartState.lastTradePrice ? 'BUY' : 'SELL';
+                chartState.lastTradePrice = price;
+                const isBigPlayer = quantity >= bigPlayerThreshold;
 
-                if (aggressor === 'BUY') {
-                    if (tick.ltq >= bigPlayerThreshold) bucket.bigPlayerBuyVolume += tick.ltq;
-                    else bucket.buyVolume += tick.ltq;
-                } else if (aggressor === 'SELL') {
-                    if (tick.ltq >= bigPlayerThreshold) bucket.bigPlayerSellVolume += tick.ltq;
-                    else bucket.sellVolume += tick.ltq;
-                }
-
-                // --- Bubble Data Preparation ---
-                if (!chartState.tradesByTime.has(timeMs)) {
-                    chartState.tradesByTime.set(timeMs, { sumLtq: 0, price: tick.ltp });
-                }
-                chartState.tradesByTime.get(timeMs).sumLtq += tick.ltq;
-            });
-
-            // --- Bubble Processing ---
-            chartState.tradesByTime.forEach((group, timeMs) => {
-                if (group.sumLtq >= bubbleThreshold) {
-                    chartState.bubbleData.push([timeMs, group.price, group.sumLtq]);
+                if (aggressor === 'BUY' || (aggressor === 'HOLD' && price >= bucket.open)) {
+                    if (isBigPlayer) bucket.bigPlayerBuyVolume += quantity;
+                    else bucket.buyVolume += quantity;
+                } else if (aggressor === 'SELL' || (aggressor === 'HOLD' && price < bucket.open)) {
+                    if (isBigPlayer) bucket.bigPlayerSellVolume += quantity;
+                    else bucket.sellVolume += quantity;
                 }
             });
 
-            const sortedBuckets = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+            // --- C. Final Bubble Processing ---
+            chartState.tradesByBubbleTime.forEach((group, bubbleIntervalStartMs) => { 
+                const maxLtq = group.trades.reduce((max, t) => Math.max(max, Number(t.ltq)), 0);
+                
+                if (group.sumLtq >= bubbleThreshold && maxLtq >= bigPlayerThreshold) {
+                    const impactScore = maxLtq / globalAvgLtq;
+                    chartState.bubbleData.push([bubbleIntervalStartMs, group.price, group.sumLtq, impactScore]);
+                }
+            });
+
+            // --- D. Final OHLCV Series Construction ---
+            const sortedBuckets = Array.from(ohlcBuckets.values()).sort((a, b) => a.time - b.time);
             sortedBuckets.forEach(b => {
                 chartState.ohlcData.push([b.time, b.open, b.close, b.low, b.high]);
                 chartState.normalBuyVol.push([b.time, b.buyVolume]);
@@ -197,6 +270,15 @@
                 chartState.bigSellVol.push([b.time, -b.bigPlayerSellVolume]);
             });
 
+            if (chartState.ohlcData.length === 0) {
+                 console.error(`Aggregation failed: OHLC Data is empty. Processed ${validTickCount} valid ticks. Check intervals or if time normalization is incorrect.`);
+                 updateStatus(`ERROR: No candles generated. Check intervals.`, false);
+                 return;
+            }
+            
+            console.log(`Generated ${chartState.ohlcData.length} OHLC candles from ${validTickCount} valid ticks.`);
+
+            // --- E. Chart Update ---
             tradingChart.setOption({
                 series: [
                     { id: 'ohlc', data: chartState.ohlcData },
@@ -205,136 +287,212 @@
                     { id: 'bigBuy', data: chartState.bigBuyVol },
                     { id: 'normalSell', data: chartState.normalSellVol },
                     { id: 'bigSell', data: chartState.bigSellVol }
+                ],
+                // Show 100% of the historical data
+                dataZoom: [
+                    { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+                    { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }
                 ]
-            }, { notMerge: true }); // Use notMerge to clear old data
-            updateStatus(`Live: ${currentSymbol}`, false);
-        };
-
-        /**
-         * Processes a single live tick incrementally, updating the chart without a full redraw.
-         */
-        function processLiveTick(tick) {
-            const intervalMs = parseInt(intervalInput.value, 10);
-            const bigPlayerThreshold = parseInt(bigPlayerQtyInput.value, 10);
-            const bubbleThreshold = parseInt(bubbleThresholdInput.value, 10);
-            const timeMs = parseInt(tick.ltt, 10);
-            if (isNaN(timeMs)) return;
-
-            chartState.rawTicks.push(tick);
-
-            // --- Update OHLCV ---
-            const intervalStartMs = Math.floor(timeMs / intervalMs) * intervalMs;
-            let lastOhlc = chartState.ohlcData[chartState.ohlcData.length - 1];
-
-            if (lastOhlc && lastOhlc[0] === intervalStartMs) {
-                // Update the last candle
-                lastOhlc[2] = tick.ltp; // Close
-                lastOhlc[4] = Math.max(lastOhlc[4], tick.ltp); // High
-                lastOhlc[3] = Math.min(lastOhlc[3], tick.ltp); // Low
-            } else {
-                // Create a new candle
-                lastOhlc = [intervalStartMs, tick.ltp, tick.ltp, tick.ltp, tick.ltp];
-                chartState.ohlcData.push(lastOhlc);
-                // Also add new points for volume bars to keep them in sync
-                chartState.normalBuyVol.push([intervalStartMs, 0]);
-                chartState.bigBuyVol.push([intervalStartMs, 0]);
-                chartState.normalSellVol.push([intervalStartMs, 0]);
-                chartState.bigSellVol.push([intervalStartMs, 0]);
-            }
-
-            // --- Update Volume ---
-            const aggressor = chartState.lastTradePrice === 0 ? 'HOLD' : tick.ltp > chartState.lastTradePrice ? 'BUY' : 'SELL';
-            chartState.lastTradePrice = tick.ltp;
-
-            if (aggressor === 'BUY') {
-                if (tick.ltq >= bigPlayerThreshold) {
-                    const vol = chartState.bigBuyVol[chartState.bigBuyVol.length - 1];
-                    vol[1] += tick.ltq;
-                } else {
-                    const vol = chartState.normalBuyVol[chartState.normalBuyVol.length - 1];
-                    vol[1] += tick.ltq;
-                }
-            } else if (aggressor === 'SELL') {
-                if (tick.ltq >= bigPlayerThreshold) {
-                    const vol = chartState.bigSellVol[chartState.bigSellVol.length - 1];
-                    vol[1] -= tick.ltq;
-                } else {
-                    const vol = chartState.normalSellVol[chartState.normalSellVol.length - 1];
-                    vol[1] -= tick.ltq;
-                }
-            }
-
-            // --- Update Bubbles ---
-            if (!chartState.tradesByTime.has(timeMs)) {
-                chartState.tradesByTime.set(timeMs, { sumLtq: 0, price: tick.ltp });
-            }
-            const tradeGroup = chartState.tradesByTime.get(timeMs);
-            const oldSumLtq = tradeGroup.sumLtq;
-            tradeGroup.sumLtq += tick.ltq;
-
-            if (tradeGroup.sumLtq >= bubbleThreshold && oldSumLtq < bubbleThreshold) {
-                // A new bubble is born
-                chartState.bubbleData.push([timeMs, tradeGroup.price, tradeGroup.sumLtq]);
-            }
-
-            // --- Update Chart ---
-            // Let ECharts efficiently update the data without a full redraw
-            tradingChart.setOption({
-                series: [
-                    { id: 'ohlc', data: chartState.ohlcData },
-                    { id: 'bubbles', data: chartState.bubbleData },
-                    { id: 'normalBuy', data: chartState.normalBuyVol },
-                    { id: 'bigBuy', data: chartState.bigBuyVol },
-                    { id: 'normalSell', data: chartState.normalSellVol },
-                    { id: 'bigSell', data: chartState.bigSellVol }
-                ]
-            });
+            }); 
+            
+            updateStatus(`History loaded for ${currentSymbol}.`, false);
         }
 
+        /** Processes a single live tick incrementally, updating the chart. */
+        function processLiveTick(tick) {
+            const candleIntervalMs = Number(candleIntervalInput.value);
+            const bubbleIntervalMs = Number(bubbleIntervalInput.value);
+            const bigPlayerThreshold = Number(bigPlayerQtyInput.value);
+            const bubbleThreshold = Number(bubbleThresholdInput.value);
+            
+            const timeMs = normalizeTimestamp(tick.ltt); 
+            const price = Number(tick.ltp);
+            const quantity = Number(tick.ltq);
+            
+            // CRITICAL CHECK: Skip invalid data points
+            if (isNaN(timeMs) || isNaN(price) || isNaN(quantity) || quantity <= 0) {
+                return; 
+            }
 
-        // --- ECharts Visualization ---
-        const initChart = () => {
-            if (tradingChart) tradingChart.dispose();
-            tradingChart = echarts.init(chartContainer);
+            chartState.rawTicks.push(tick);
+            
+            // CALCULATE TWO SEPARATE INTERVAL START TIMES
+            const candleIntervalStartMs = Math.floor(timeMs / candleIntervalMs) * candleIntervalMs;
+            const bubbleIntervalStartMs = Math.floor(timeMs / bubbleIntervalMs) * bubbleIntervalMs;
+
+            // --- A. Update OHLCV & Volume (Candle Interval) ---
+            let lastOhlc = chartState.ohlcData[chartState.ohlcData.length - 1];
+
+            // 1. Update existing candle or create a new one
+            if (lastOhlc && lastOhlc[0] === candleIntervalStartMs) {
+                lastOhlc[2] = price; 
+                lastOhlc[4] = Math.max(lastOhlc[4], price); 
+                lastOhlc[3] = Math.min(lastOhlc[3], price); 
+            } else {
+                lastOhlc = [candleIntervalStartMs, price, price, price, price];
+                chartState.ohlcData.push(lastOhlc);
+                // Initialize Volume bars for the new candle
+                chartState.normalBuyVol.push([candleIntervalStartMs, 0]);
+                chartState.bigBuyVol.push([candleIntervalStartMs, 0]);
+                chartState.normalSellVol.push([candleIntervalStartMs, 0]);
+                chartState.bigSellVol.push([candleIntervalStartMs, 0]);
+            }
+
+            // 2. Volume calculation
+            const aggressor = chartState.lastTradePrice === 0 ? 'HOLD' : price > chartState.lastTradePrice ? 'BUY' : 'SELL';
+            chartState.lastTradePrice = price;
+            const isBigPlayer = quantity >= bigPlayerThreshold;
+            
+            const lastNormalBuyVol = chartState.normalBuyVol[chartState.normalBuyVol.length - 1];
+            const lastBigBuyVol = chartState.bigBuyVol[chartState.bigBuyVol.length - 1];
+            const lastNormalSellVol = chartState.normalSellVol[chartState.normalSellVol.length - 1];
+            const lastBigSellVol = chartState.bigSellVol[chartState.bigSellVol.length - 1];
+
+            if (aggressor === 'BUY' || (aggressor === 'HOLD' && price >= lastOhlc[1])) {
+                if (isBigPlayer) lastBigBuyVol[1] += quantity; 
+                else lastNormalBuyVol[1] += quantity;
+            } else if (aggressor === 'SELL' || (aggressor === 'HOLD' && price < lastOhlc[1])) {
+                if (isBigPlayer) lastBigSellVol[1] -= quantity;
+                else lastNormalSellVol[1] -= quantity;
+            }
+
+            // --- B. Update Bubbles (Bubble Interval) ---
+            if (!chartState.tradesByBubbleTime.has(bubbleIntervalStartMs)) { 
+                chartState.tradesByBubbleTime.set(bubbleIntervalStartMs, { sumLtq: 0, price: price, trades: [] });
+            }
+            const tradeGroup = chartState.tradesByBubbleTime.get(bubbleIntervalStartMs);
+            tradeGroup.sumLtq += quantity;
+            tradeGroup.trades.push(tick); 
+            tradeGroup.price = price; 
+
+            const maxLtq = tradeGroup.trades.reduce((max, t) => Math.max(max, Number(t.ltq)), 0);
+            
+            if (tradeGroup.sumLtq >= bubbleThreshold && maxLtq >= bigPlayerThreshold) {
+                const impactScore = maxLtq / globalAvgLtq;
+                const newBubble = [bubbleIntervalStartMs, tradeGroup.price, tradeGroup.sumLtq, impactScore]; 
+                
+                const existingBubbleIndex = chartState.bubbleData.findIndex(b => b[0] === bubbleIntervalStartMs); 
+                
+                if (existingBubbleIndex === -1) {
+                    chartState.bubbleData.push(newBubble); 
+                } else {
+                    chartState.bubbleData[existingBubbleIndex] = newBubble; 
+                }
+            }
+
+            // --- C. Update Chart ---
             tradingChart.setOption({
-                animation: false,
-                tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-                axisPointer: { link: [{ xAxisIndex: 'all' }] },
-                grid: [{ bottom: '32%', right: '8%', left: '8%' }, { top: '72%', height: '16%', right: '8%', left: '8%' }],
-                xAxis: [
-                    { type: 'time', scale: true, axisLine: { onZero: false }, splitLine: { show: false }, axisLabel: { show: false } },
-                    { type: 'time', gridIndex: 1, scale: true, axisLine: { onZero: false }, splitLine: { show: false } }
+                series: [
+                    { id: 'ohlc', data: chartState.ohlcData },
+                    { id: 'bubbles', data: chartState.bubbleData },
+                    { id: 'normalBuy', data: chartState.normalBuyVol },
+                    { id: 'bigBuy', data: chartState.bigBuyVol },
+                    { id: 'normalSell', data: chartState.normalSellVol },
+                    { id: 'bigSell', data: chartState.bigSellVol }
                 ],
-                yAxis: [{ scale: true }, { gridIndex: 1, scale: true, splitNumber: 2, axisLabel: { show: false } }],
+                // Force scroll to the right for live viewing
                 dataZoom: [
                     { type: 'inside', xAxisIndex: [0, 1], start: 95, end: 100 },
                     { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 95, end: 100 }
+                ]
+            });
+            updateStatus(`Live: ${currentSymbol}`, true);
+        }
+
+
+        // --- 4. ECharts Visualization Setup (Unchanged) ---
+        const initChart = () => {
+            if (tradingChart) tradingChart.dispose();
+            tradingChart = echarts.init(chartContainer);
+            
+            const tooltipFormatter = function (params) {
+                // Ensure the time is formatted correctly
+                let res = 'Time: ' + new Date(params[0].value[0]).toLocaleTimeString() + '<br/>';
+                let ohlcItem = params.find(p => p.seriesId === 'ohlc');
+                let bubbleItem = params.find(p => p.seriesId === 'bubbles');
+
+                if (ohlcItem) { 
+                    res += `O: ${ohlcItem.value[1].toFixed(2)} | H: ${ohlcItem.value[4].toFixed(2)} | L: ${ohlcItem.value[3].toFixed(2)} | C: ${ohlcItem.value[2].toFixed(2)}<br/>`; 
+                }
+                if (bubbleItem) { 
+                    res += `<span style="color:${bubbleItem.color}">●</span> **Bubble Price: ${bubbleItem.value[1].toFixed(2)}** | Impact Qty: ${bubbleItem.value[2]} | Impact Score: ${bubbleItem.value[3].toFixed(1)}x<br/>`; 
+                }
+                let volumeItems = params.filter(p => p.seriesName.includes('Buy') || p.seriesName.includes('Sell'));
+                let totalVolume = volumeItems.reduce((sum, p) => sum + Math.abs(p.value[1]), 0);
+                res += 'Total Volume: ' + totalVolume;
+                return res;
+            };
+
+            tradingChart.setOption({
+                animation: true, animationDuration: 50,
+                tooltip: { 
+                    trigger: 'axis', 
+                    axisPointer: { type: 'cross' },
+                    formatter: tooltipFormatter
+                },
+                axisPointer: { link: [{ xAxisIndex: 'all' }] },
+                grid: [
+                    { left: '10%', right: '8%', height: '50%' },
+                    { left: '10%', right: '8%', top: '68%', height: '16%' }
+                ],
+                xAxis: [
+                    { type: 'time', scale: true, axisLine: { onZero: false }, splitLine: { show: false }, axisLabel: { show: false } },
+                    { type: 'time', gridIndex: 1, scale: true, axisLine: { onZero: false }, axisTick: { show: false }, splitLine: { show: false }, axisLabel: { show: true } }
+                ],
+                yAxis: [
+                    { scale: true, splitArea: { show: true } },
+                    { gridIndex: 1, scale: true, splitNumber: 2, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false } }
+                ],
+                dataZoom: [
+                    { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+                    { show: true, xAxisIndex: [0, 1], type: 'slider', top: '90%', start: 0, end: 100 }
                 ],
                 series: [
+                    // Candlestick (OHLC)
                     { id: 'ohlc', name: 'Candlestick', type: 'candlestick', data: [], itemStyle: { color: '#22c55e', color0: '#ef4444', borderColor: '#16a34a', borderColor0: '#dc2626' } },
-                    { id: 'bubbles', name: 'Volume Bubble', type: 'scatter', data: [], symbolSize: data => Math.min(50, Math.max(5, Math.log(data[2] + 1) * 2)) },
-                    { id: 'normalBuy', name: 'Normal Buy', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'Vol', itemStyle: { color: '#86efac'} },
-                    { id: 'bigBuy', name: 'Big Buy', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'Vol', itemStyle: { color: '#22c55e'} },
-                    { id: 'normalSell', name: 'Normal Sell', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'Vol', itemStyle: { color: '#fca5a5'} },
-                    { id: 'bigSell', name: 'Big Sell', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'Vol', itemStyle: { color: '#ef4444'} }
+                    
+                    // Bubble (High Impact Trade)
+                     {id: 'bubbles', 
+                        name: 'High Impact Trade', type: 'scatter', data: [],
+                        symbolSize: (data) => {
+                            const quantity = data[2];
+                            const normalized = Math.log(quantity / globalAvgLtq + 1); 
+                            return Math.min(50, Math.max(5, normalized * 10)); 
+                        },
+                        itemStyle: {
+                            color: (params) => {
+                                const impactScore = params.data[3]; 
+                                const cap = 5.0; 
+                                const ratio = Math.min(1, Math.max(0, (impactScore - 1) / (cap - 1)));
+                                const hue = (1 - ratio) * 120; // Green (120) to Red (0)
+                                return `hsl(${hue}, 80%, 50%)`;
+                            },
+                            opacity: 0.7
+                        }
+                    },
+                    
+                    // Volume Bars (Stacked)
+                    { id: 'normalBuy', name: 'Normal Buy', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'TotalVolume', itemStyle: { color: '#86efac'} },
+                    { id: 'bigBuy', name: 'Big Player Buy', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'TotalVolume', itemStyle: { color: '#22c55e'} },
+                    { id: 'normalSell', name: 'Normal Sell', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'TotalVolume', itemStyle: { color: '#fca5a5'} },
+                    { id: 'bigSell', name: 'Big Player Sell', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: [], stack: 'TotalVolume', itemStyle: { color: '#ef4444'} }
                 ]
             });
         };
 
-        // --- WebSocket Connection & Logic ---
+        // --- 5. WebSocket Connection & Logic (Updated) ---
         const connectSocket = () => {
             if (socket) socket.disconnect();
             socket = io('/bubble');
 
             socket.on('connect', () => {
-                updateStatus('Connected. Requesting data...', true);
-                if (currentSymbol) {
-                    socket.emit('request_initial_data', { symbol: currentSymbol });
-                }
+                updateStatus('Connected. Select a security.', false);
+                socket.emit('request_available_securities'); 
             });
 
             socket.on('disconnect', () => updateStatus('Disconnected.', false));
 
+            // HANDLER 1: Update security dropdown list (available_securities)
             socket.on('available_securities', (data) => {
                 const selectedValue = securitySelect.value;
                 securitySelect.innerHTML = '<option value="" disabled selected>-- Select a Security --</option>';
@@ -344,46 +502,60 @@
                     option.textContent = id;
                     securitySelect.appendChild(option);
                 });
-                // Restore selection if possible
                 if (data.securities.includes(selectedValue)) {
                     securitySelect.value = selectedValue;
                 }
             });
 
+            // HANDLER 2: Load historical data (historical_ticks)
             socket.on('historical_ticks', (msg) => {
                 if (msg.securityId !== currentSymbol) return;
-                resetChartState();
+                // DO NOT call resetChartState here. Only update rawTicks.
                 chartState.rawTicks = msg.ticks;
                 processAndDrawAll();
+                updateStatus(`Loaded ${msg.ticks.length} historical ticks.`, false);
             });
 
+            // HANDLER 3: Process live tick (live_tick)
             socket.on('live_tick', (msg) => {
                 if (msg.securityId !== currentSymbol || !msg.tick) return;
                 processLiveTick(msg.tick);
             });
         };
 
-        // --- Event Handlers ---
+        // --- 6. Event Handlers (Updated) ---
         securitySelect.addEventListener('change', () => {
             currentSymbol = securitySelect.value;
             if (!currentSymbol) return;
             document.getElementById('symbol-header').textContent = `Symbol: ${currentSymbol}`;
-            initChart(); // Clear the previous chart
-            resetChartState();
+            initChart(); 
+            // When changing symbol, we clear ALL data including rawTicks and aggregated series.
+            chartState.rawTicks = []; 
+            resetAggregatedData(); 
             updateStatus(`Fetching data for ${currentSymbol}...`, true);
-            // Re-request data for the new symbol
+            
             if (socket && socket.connected) {
                 socket.emit('request_initial_data', { symbol: currentSymbol });
             }
         });
 
-        intervalInput.addEventListener('change', processAndDrawAll);
-        bigPlayerQtyInput.addEventListener('change', processAndDrawAll);
-        bubbleThresholdInput.addEventListener('change', updateBubbleSeries);
+        // Full reprocessing needed when interval or big player quantity changes
+        candleIntervalInput.addEventListener('change', () => { 
+            if (chartState.rawTicks.length > 0) processAndDrawAll();
+        });
+        bubbleIntervalInput.addEventListener('change', () => { 
+            if (chartState.rawTicks.length > 0) processAndDrawAll();
+        });
+        bigPlayerQtyInput.addEventListener('change', () => {
+            if (chartState.rawTicks.length > 0) processAndDrawAll();
+        });
+        
+        // Bubble threshold only requires re-filtering/re-checking the existing aggregated data
+        bubbleThresholdInput.addEventListener('change', updateBubbleSeries); 
 
         window.addEventListener('resize', () => tradingChart?.resize());
 
-        // --- Initialization ---
+        // --- 7. Initialization ---
         window.onload = () => {
             initChart();
             connectSocket();

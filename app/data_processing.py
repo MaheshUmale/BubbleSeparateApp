@@ -62,9 +62,10 @@ def start_symbol_subscription_thread(wss_client):
         print("Checking for new symbols to subscribe...")
 
         # Wait for the WebSocket connection to be fully established
-        if not wss_client.upstox_streamer or not wss_client.upstox_streamer.is_connected():
+        if not wss_client.upstox_streamer :
             print("WebSocket client not connected. Waiting for connection...")
-            time.sleep(10)
+
+            time.sleep(10) 
             continue
 
         instrument_keys = get_instrument_keys_from_bbscan(project_root)

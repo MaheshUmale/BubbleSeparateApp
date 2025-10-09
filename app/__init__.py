@@ -2,7 +2,7 @@ import os
 import sys
 import threading
 from flask import Flask, session, render_template, redirect, url_for, send_from_directory
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room,leave_room
 
 def create_app():
     """

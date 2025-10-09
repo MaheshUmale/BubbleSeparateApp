@@ -122,9 +122,8 @@ def callback():
             flash('Successfully logged in to Upstox!', 'success')
 
             if _start_websocket_connection:
-                # Start the websocket connection in a background thread
-                websocket_thread = Thread(target=_start_websocket_connection, args=(token,), daemon=True)
-                websocket_thread.start()
+                # The WSSClient now manages its own connection thread.
+                _start_websocket_connection(token)
             else:
                 flash("Websocket connection could not be started.", "error")
 
@@ -162,9 +161,8 @@ def reStartWSSClient():
         if token:
                 
             if _start_websocket_connection:
-                # Start the websocket connection in a background thread
-                websocket_thread = Thread(target=_start_websocket_connection, args=(token,), daemon=True)
-                websocket_thread.start()
+                # The WSSClient now manages its own connection thread.
+                _start_websocket_connection(token)
             else:
                 flash("Websocket connection could not be started.", "error")
 
